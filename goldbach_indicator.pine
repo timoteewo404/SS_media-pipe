@@ -1,57 +1,298 @@
 //@version=5
-indicator("Goldbach Fundamentals Indicator", overlay=true)
+indicator("Goldbach Fundamentals - PO3/IPDA/AMD Indicator", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
-// Inputs
-po3 = input.int(27, "Power of Three Range", minval=1, tooltip="Choose a Power of Three value like 27, 81, 243 based on asset volatility")
-showOB = input.bool(true, "Show Order Blocks")
-showFVG = input.bool(true, "Show Fair Value Gaps")
-showExt = input.bool(true, "Show External Ranges")
-equilibriumMode = input.string("All", "Equilibrium Mode", options=["All", "High/Low", "Midpoint"])
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS - Power of Three & Goldbach Configuration
+// ═══════════════════════════════════════════════════════════════════════════════
+po3_selection = input.string("27", "Power of Three Value", options=["9", "27", "81", "243", "729"], tooltip="PO3 sequence: 3^2=9, 3^3=27, 3^4=81, 3^5=243, 3^6=729")
+po3 = po3_selection == "9" ? 9 : po3_selection == "27" ? 27 : po3_selection == "81" ? 81 : po3_selection == "243" ? 243 : 729
+goldbach_levels_count = input.int(3, "Number of Goldbach Levels", minval=1, maxval=5, tooltip="How many levels to plot above and below fix price")
+show_fix_price = input.bool(true, "Show Fix Price", tooltip="Central anchor point - daily open or previous day close")
+fix_price_type = input.string("Daily Open", "Fix Price Type", options=["Daily Open", "Previous Day Close", "Current Close"])
 
-// Session definitions (example: Asia 9h, London 6h, NY 9h)
-accumulationStart = input.time(9, "Accumulation Start Hour (UTC)")
-accumulationHours = input.int(9, "Accumulation Duration (hours)")
-manipulationStart = input.time(15, "Manipulation Start Hour (UTC)")
-manipulationHours = input.int(6, "Manipulation Duration (hours)")
-distributionStart = input.time(21, "Distribution Start Hour (UTC)")
-distributionHours = input.int(9, "Distribution Duration (hours)")
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS - IPDA Configuration
+// ═══════════════════════════════════════════════════════════════════════════════
+show_ipda = input.bool(true, "Show IPDA Levels", tooltip="Institutional Price Delivery Arrays - Premium/Discount zones")
+ipda_lookback = input.int(20, "IPDA Lookback Period", minval=5, maxval=100, tooltip="Bars to look back for IPDA calculation")
 
-// Current session detection
-currentHour = hour(time)
-isAccumulation = currentHour >= accumulationStart and currentHour < accumulationStart + accumulationHours
-isManipulation = currentHour >= manipulationStart and currentHour < manipulationStart + manipulationHours
-isDistribution = currentHour >= distributionStart and currentHour < distributionStart + distributionHours
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS - AMD Cycle Configuration
+// ═══════════════════════════════════════════════════════════════════════════════
+show_amd = input.bool(true, "Show AMD Cycles", tooltip="Accumulation, Manipulation, Distribution phases")
+amd_session_type = input.string("Custom", "AMD Session Type", options=["Asian", "London", "New York", "Custom"])
 
-// Calculate Goldbach levels based on PO3
-basePrice = close
-highLevel1 = basePrice + po3
-highLevel2 = basePrice + 2 * po3
-highLevel3 = basePrice + 3 * po3
-lowLevel1 = basePrice - po3
-lowLevel2 = basePrice - 2 * po3
-lowLevel3 = basePrice - 3 * po3
+// Custom session times (in exchange timezone)
+accumulation_start = input.int(0, "Accumulation Start Hour", minval=0, maxval=23, tooltip="Hour in exchange timezone")
+accumulation_end = input.int(8, "Accumulation End Hour", minval=0, maxval=23)
+manipulation_start = input.int(8, "Manipulation Start Hour", minval=0, maxval=23)
+manipulation_end = input.int(14, "Manipulation End Hour", minval=0, maxval=23)
+distribution_start = input.int(14, "Distribution Start Hour", minval=0, maxval=23)
+distribution_end = input.int(23, "Distribution End Hour", minval=0, maxval=23)
 
-// Plot levels based on equilibrium mode
-if equilibriumMode == "All" or equilibriumMode == "High/Low"
-    plot(highLevel1, "High Level 1", color=color.green, linewidth=2)
-    plot(highLevel2, "High Level 2", color=color.blue, linewidth=1)
-    plot(highLevel3, "High Level 3", color=color.purple, linewidth=1)
-    plot(lowLevel1, "Low Level 1", color=color.red, linewidth=2)
-    plot(lowLevel2, "Low Level 2", color=color.orange, linewidth=1)
-    plot(lowLevel3, "Low Level 3", color=color.yellow, linewidth=1)
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS - Order Blocks & Fair Value Gaps
+// ═══════════════════════════════════════════════════════════════════════════════
+show_ob = input.bool(true, "Show Order Blocks", tooltip="Bullish and Bearish Order Blocks")
+ob_lookback = input.int(10, "Order Block Lookback", minval=3, maxval=50)
+show_fvg = input.bool(true, "Show Fair Value Gaps", tooltip="Imbalance zones - 3 candle pattern")
+fvg_min_size = input.float(0.0, "Min FVG Size (% of ATR)", minval=0.0, maxval=2.0, step=0.1)
 
-if equilibriumMode == "Midpoint"
-    midpoint = (highLevel1 + lowLevel1) / 2
-    plot(midpoint, "Midpoint", color=color.gray, linewidth=2)
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS - External & Dealing Ranges
+// ═══════════════════════════════════════════════════════════════════════════════
+show_ext = input.bool(true, "Show External Ranges", tooltip="Ranges beyond dealing ranges")
+show_dealing_range = input.bool(true, "Show Dealing Range", tooltip="Current session dealing range")
+dealing_range_period = input.int(20, "Dealing Range Period", minval=5, maxval=100)
 
-// AMD blocks visualization (simplified example for OB, FVG, Ext)
-if showOB and isAccumulation
-    box.new(left=bar_index - 10, top=highLevel1, right=bar_index, bottom=lowLevel1, bgcolor=color.new(color.green, 90), border_color=color.green, title="Accumulation OB")
-if showFVG and isManipulation
-    box.new(left=bar_index - 10, top=highLevel2, right=bar_index, bottom=lowLevel2, bgcolor=color.new(color.blue, 90), border_color=color.blue, title="Manipulation FVG")
-if showExt and isDistribution
-    box.new(left=bar_index - 10, top=highLevel3, right=bar_index, bottom=lowLevel3, bgcolor=color.new(color.red, 90), border_color=color.red, title="Distribution Ext")
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS - Display Options
+// ═══════════════════════════════════════════════════════════════════════════════
+equilibrium_mode = input.string("All", "Equilibrium Mode", options=["All", "Premium/Discount", "Midpoint Only"])
+show_labels = input.bool(true, "Show Level Labels")
+label_distance = input.int(5, "Label Distance (bars)", minval=1, maxval=50)
 
-// Labels for session
-sessionLabel = isAccumulation ? "Accumulation" : isManipulation ? "Manipulation" : isDistribution ? "Distribution" : "Other"
-label.new(bar_index, high, sessionLabel, style=label.style_label_down, color=color.white, textcolor=color.black)
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS - Fix Price (Central Anchor)
+// ═══════════════════════════════════════════════════════════════════════════════
+var float fix_price = na
+if timeframe.isintraday
+    if fix_price_type == "Daily Open"
+        fix_price := ta.valuewhen(ta.change(time('D')), open, 0)
+    else if fix_price_type == "Previous Day Close"
+        fix_price := ta.valuewhen(ta.change(time('D')), close[1], 0)
+    else
+        fix_price := close
+else
+    fix_price := close
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS - Goldbach Levels with PO3
+// ═══════════════════════════════════════════════════════════════════════════════
+// Fractal approach: levels built using Power of Three sequence
+var float[] premium_levels = array.new_float(0)
+var float[] discount_levels = array.new_float(0)
+
+if barstate.islast
+    array.clear(premium_levels)
+    array.clear(discount_levels)
+    
+    for i = 1 to goldbach_levels_count
+        // Premium levels (above fix price)
+        array.push(premium_levels, fix_price + (i * po3))
+        // Discount levels (below fix price)
+        array.push(discount_levels, fix_price - (i * po3))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS - IPDA Levels (Institutional Price Delivery Arrays)
+// ═══════════════════════════════════════════════════════════════════════════════
+ipda_high = ta.highest(high, ipda_lookback)
+ipda_low = ta.lowest(low, ipda_lookback)
+ipda_range = ipda_high - ipda_low
+ipda_equilibrium = (ipda_high + ipda_low) / 2
+ipda_premium_zone = ipda_equilibrium + (ipda_range * 0.25)  // 75% level
+ipda_discount_zone = ipda_equilibrium - (ipda_range * 0.25)  // 25% level
+ipda_optimal_trade_entry = ipda_equilibrium  // 50% - equilibrium
+
+// Price position relative to IPDA
+in_premium = close > ipda_equilibrium
+in_discount = close < ipda_equilibrium
+in_equilibrium = math.abs(close - ipda_equilibrium) < (ipda_range * 0.1)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS - AMD Cycle Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+current_hour = hour(time)
+
+// Preset sessions based on selection
+var int acc_start = 0, var int acc_end = 0
+var int man_start = 0, var int man_end = 0
+var int dis_start = 0, var int dis_end = 0
+
+if amd_session_type == "Asian"
+    acc_start := 0, acc_end := 8      // Asian session accumulation
+    man_start := 8, man_end := 10     // Manipulation into London
+    dis_start := 10, dis_end := 16    // Distribution during London/NY overlap
+else if amd_session_type == "London"
+    acc_start := 2, acc_end := 8      // Pre-London accumulation
+    man_start := 8, man_end := 10     // London open manipulation
+    dis_start := 10, dis_end := 16    // London distribution
+else if amd_session_type == "New York"
+    acc_start := 8, acc_end := 13     // Accumulation before NY
+    man_start := 13, man_end := 15    // NY open manipulation
+    dis_start := 15, dis_end := 20    // NY distribution
+else  // Custom
+    acc_start := accumulation_start, acc_end := accumulation_end
+    man_start := manipulation_start, man_end := manipulation_end
+    dis_start := distribution_start, dis_end := distribution_end
+
+is_accumulation = current_hour >= acc_start and current_hour < acc_end
+is_manipulation = current_hour >= man_start and current_hour < man_end
+is_distribution = current_hour >= dis_start and current_hour < dis_end
+
+amd_phase = is_accumulation ? "Accumulation" : is_manipulation ? "Manipulation" : is_distribution ? "Distribution" : "Inactive"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS - Order Blocks (OB)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Bullish OB: Last down-close candle before strong up move
+// Bearish OB: Last up-close candle before strong down move
+var float bullish_ob_high = na, var float bullish_ob_low = na
+var float bearish_ob_high = na, var float bearish_ob_low = na
+var int bullish_ob_bar = na, var int bearish_ob_bar = na
+
+// Detect bullish order block (demand zone)
+bullish_swing = close > close[1] and close[1] < close[2] and (high - low) > (high[1] - low[1]) * 1.5
+if bullish_swing and show_ob
+    bullish_ob_high := high[1]
+    bullish_ob_low := low[1]
+    bullish_ob_bar := bar_index[1]
+
+// Detect bearish order block (supply zone)
+bearish_swing = close < close[1] and close[1] > close[2] and (high - low) > (high[1] - low[1]) * 1.5
+if bearish_swing and show_ob
+    bearish_ob_high := high[1]
+    bearish_ob_low := low[1]
+    bearish_ob_bar := bar_index[1]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS - Fair Value Gaps (FVG)
+// ═══════════════════════════════════════════════════════════════════════════════
+atr = ta.atr(14)
+min_fvg_size = fvg_min_size * atr
+
+// Bullish FVG: gap between high[2] and low[0], with low[0] > high[2]
+bullish_fvg = low > high[2]
+bullish_fvg_top = bullish_fvg ? low : na
+bullish_fvg_bottom = bullish_fvg ? high[2] : na
+bullish_fvg_size = bullish_fvg ? (bullish_fvg_top - bullish_fvg_bottom) : 0
+bullish_fvg_valid = bullish_fvg and bullish_fvg_size >= min_fvg_size
+
+// Bearish FVG: gap between low[2] and high[0], with high[0] < low[2]
+bearish_fvg = high < low[2]
+bearish_fvg_top = bearish_fvg ? low[2] : na
+bearish_fvg_bottom = bearish_fvg ? high : na
+bearish_fvg_size = bearish_fvg ? (bearish_fvg_top - bearish_fvg_bottom) : 0
+bearish_fvg_valid = bearish_fvg and bearish_fvg_size >= min_fvg_size
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS - Dealing Range & External Range
+// ═══════════════════════════════════════════════════════════════════════════════
+dealing_high = ta.highest(high, dealing_range_period)
+dealing_low = ta.lowest(low, dealing_range_period)
+dealing_mid = (dealing_high + dealing_low) / 2
+dealing_range_size = dealing_high - dealing_low
+
+// External ranges (beyond dealing range)
+external_high = dealing_high + (dealing_range_size * 0.618)  // Fibonacci extension
+external_low = dealing_low - (dealing_range_size * 0.618)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLOTTING - Fix Price
+// ═══════════════════════════════════════════════════════════════════════════════
+plot(show_fix_price ? fix_price : na, "Fix Price", color=color.new(color.white, 0), linewidth=2, style=plot.style_cross)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLOTTING - Goldbach Levels
+// ═══════════════════════════════════════════════════════════════════════════════
+if equilibrium_mode == "All" or equilibrium_mode == "Premium/Discount"
+    // Premium levels
+    plot(array.size(premium_levels) > 0 ? array.get(premium_levels, 0) : na, "Premium L1", color=color.new(color.green, 20), linewidth=2)
+    plot(array.size(premium_levels) > 1 ? array.get(premium_levels, 1) : na, "Premium L2", color=color.new(color.green, 40), linewidth=1)
+    plot(array.size(premium_levels) > 2 ? array.get(premium_levels, 2) : na, "Premium L3", color=color.new(color.green, 60), linewidth=1)
+    
+    // Discount levels
+    plot(array.size(discount_levels) > 0 ? array.get(discount_levels, 0) : na, "Discount L1", color=color.new(color.red, 20), linewidth=2)
+    plot(array.size(discount_levels) > 1 ? array.get(discount_levels, 1) : na, "Discount L2", color=color.new(color.red, 40), linewidth=1)
+    plot(array.size(discount_levels) > 2 ? array.get(discount_levels, 2) : na, "Discount L3", color=color.new(color.red, 60), linewidth=1)
+
+if equilibrium_mode == "Midpoint Only"
+    plot(fix_price, "Equilibrium", color=color.new(color.yellow, 0), linewidth=2)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLOTTING - IPDA Levels
+// ═══════════════════════════════════════════════════════════════════════════════
+plot(show_ipda ? ipda_high : na, "IPDA High", color=color.new(color.blue, 50), linewidth=1, style=plot.style_circles)
+plot(show_ipda ? ipda_premium_zone : na, "IPDA Premium (75%)", color=color.new(color.aqua, 60), linewidth=1, style=plot.style_stepline)
+plot(show_ipda ? ipda_equilibrium : na, "IPDA Equilibrium (50%)", color=color.new(color.orange, 40), linewidth=2, style=plot.style_line)
+plot(show_ipda ? ipda_discount_zone : na, "IPDA Discount (25%)", color=color.new(color.lime, 60), linewidth=1, style=plot.style_stepline)
+plot(show_ipda ? ipda_low : na, "IPDA Low", color=color.new(color.blue, 50), linewidth=1, style=plot.style_circles)
+
+// IPDA zones fill
+fill_color_premium = color.new(color.red, 95)
+fill_color_discount = color.new(color.green, 95)
+fill_color_eq = color.new(color.gray, 97)
+
+ipda_h = plot(show_ipda ? ipda_high : na, display=display.none)
+ipda_pz = plot(show_ipda ? ipda_premium_zone : na, display=display.none)
+ipda_eq = plot(show_ipda ? ipda_equilibrium : na, display=display.none)
+ipda_dz = plot(show_ipda ? ipda_discount_zone : na, display=display.none)
+ipda_l = plot(show_ipda ? ipda_low : na, display=display.none)
+
+fill(ipda_h, ipda_pz, fill_color_premium, title="IPDA Premium Zone")
+fill(ipda_pz, ipda_eq, fill_color_eq, title="IPDA Equilibrium Zone Upper")
+fill(ipda_eq, ipda_dz, fill_color_eq, title="IPDA Equilibrium Zone Lower")
+fill(ipda_dz, ipda_l, fill_color_discount, title="IPDA Discount Zone")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLOTTING - Dealing Range & External Range
+// ═══════════════════════════════════════════════════════════════════════════════
+plot(show_dealing_range ? dealing_high : na, "Dealing High", color=color.new(color.purple, 30), linewidth=2, style=plot.style_line)
+plot(show_dealing_range ? dealing_mid : na, "Dealing Mid", color=color.new(color.purple, 60), linewidth=1, style=plot.style_line)
+plot(show_dealing_range ? dealing_low : na, "Dealing Low", color=color.new(color.purple, 30), linewidth=2, style=plot.style_line)
+
+plot(show_ext ? external_high : na, "External High", color=color.new(color.fuchsia, 40), linewidth=1, style=plot.style_cross)
+plot(show_ext ? external_low : na, "External Low", color=color.new(color.fuchsia, 40), linewidth=1, style=plot.style_cross)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VISUALIZATION - Order Blocks
+// ═══════════════════════════════════════════════════════════════════════════════
+if show_ob and not na(bullish_ob_high) and bar_index - bullish_ob_bar <= ob_lookback
+    box.new(bullish_ob_bar, bullish_ob_high, bar_index + label_distance, bullish_ob_low, 
+            border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 85), 
+            text="Bull OB", text_color=color.green, text_size=size.small)
+
+if show_ob and not na(bearish_ob_high) and bar_index - bearish_ob_bar <= ob_lookback
+    box.new(bearish_ob_bar, bearish_ob_high, bar_index + label_distance, bearish_ob_low, 
+            border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 85), 
+            text="Bear OB", text_color=color.red, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VISUALIZATION - Fair Value Gaps
+// ═══════════════════════════════════════════════════════════════════════════════
+if show_fvg and bullish_fvg_valid
+    box.new(bar_index[2], bullish_fvg_top, bar_index + 10, bullish_fvg_bottom, 
+            border_color=color.new(color.lime, 60), bgcolor=color.new(color.lime, 90), 
+            text="FVG↑", text_color=color.lime, text_size=size.tiny, extend=extend.right)
+
+if show_fvg and bearish_fvg_valid
+    box.new(bar_index[2], bearish_fvg_top, bar_index + 10, bearish_fvg_bottom, 
+            border_color=color.new(color.maroon, 60), bgcolor=color.new(color.maroon, 90), 
+            text="FVG↓", text_color=color.maroon, text_size=size.tiny, extend=extend.right)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VISUALIZATION - AMD Cycle Background & Labels
+// ═══════════════════════════════════════════════════════════════════════════════
+amd_bg_color = is_accumulation ? color.new(color.blue, 95) : 
+               is_manipulation ? color.new(color.yellow, 95) : 
+               is_distribution ? color.new(color.red, 95) : na
+
+bgcolor(show_amd ? amd_bg_color : na, title="AMD Phase Background")
+
+// AMD Cycle label
+if show_amd and show_labels and barstate.islast
+    label.new(bar_index + label_distance, high, 
+              "AMD: " + amd_phase + "\nIPDA: " + (in_premium ? "Premium" : in_discount ? "Discount" : "Equilibrium"), 
+              style=label.style_label_down, 
+              color=is_accumulation ? color.blue : is_manipulation ? color.yellow : is_distribution ? color.red : color.gray, 
+              textcolor=color.white, size=size.normal)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+alertcondition(bullish_fvg_valid, "Bullish FVG Detected", "Bullish Fair Value Gap formed - potential support")
+alertcondition(bearish_fvg_valid, "Bearish FVG Detected", "Bearish Fair Value Gap formed - potential resistance")
+alertcondition(ta.crossover(close, ipda_equilibrium), "Price Above IPDA EQ", "Price crossed above IPDA Equilibrium - entering premium")
+alertcondition(ta.crossunder(close, ipda_equilibrium), "Price Below IPDA EQ", "Price crossed below IPDA Equilibrium - entering discount")
+alertcondition(is_manipulation, "Manipulation Phase", "AMD Manipulation phase active - watch for liquidity grabs")
+alertcondition(is_distribution, "Distribution Phase", "AMD Distribution phase active - expect directional move")
