@@ -1,57 +1,275 @@
 //@version=5
-indicator("Goldbach Fundamentals Indicator", overlay=true)
+indicator("ICT Demystifying 2 - Advanced Indicator", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
-// Inputs
-po3 = input.int(27, "Power of Three Range", minval=1, tooltip="Choose a Power of Three value like 27, 81, 243 based on asset volatility")
+// ===== INPUTS =====
+// Power of Three (PO3) Settings - Tesla 3-6-9 inspired
+po3Multiplier = input.string("27", "PO3 Multiplier", options=["3", "9", "27", "81", "243"], tooltip="Tesla's 3-6-9: Power of Three multiplier for dealing ranges")
+po3Levels = input.int(3, "Number of PO3 Levels", minval=1, maxval=5, tooltip="How many PO3 levels to plot above/below price")
+showPO3 = input.bool(true, "Show PO3 Levels")
+
+// Huddleston Levels
+showHuddleston = input.bool(true, "Show Huddleston Levels", tooltip="Key institutional price delivery points")
+huddlestonLookback = input.int(100, "Huddleston Lookback", minval=20, maxval=500, tooltip="Lookback period for Huddleston levels")
+
+// IPDA (Institutional Price Delivery Arrays)
+showIPDA = input.bool(true, "Show IPDA Levels", tooltip="Institutional Price Delivery Arrays")
+ipdaLookback = input.int(60, "IPDA Lookback", minval=20, maxval=200, tooltip="Lookback for IPDA calculation")
+
+// AMD Cycle Lookback Periods (20-40-60)
+lookback20 = input.bool(true, "Use 20-period lookback")
+lookback40 = input.bool(true, "Use 40-period lookback")
+lookback60 = input.bool(true, "Use 60-period lookback")
+
+// Order Blocks, FVG, External Ranges
 showOB = input.bool(true, "Show Order Blocks")
+obLookback = input.int(20, "Order Block Lookback", minval=5, maxval=100)
 showFVG = input.bool(true, "Show Fair Value Gaps")
+fvgLookback = input.int(20, "FVG Lookback", minval=5, maxval=100)
 showExt = input.bool(true, "Show External Ranges")
-equilibriumMode = input.string("All", "Equilibrium Mode", options=["All", "High/Low", "Midpoint"])
+extLookback = input.int(40, "External Range Lookback", minval=10, maxval=200)
 
-// Session definitions (example: Asia 9h, London 6h, NY 9h)
-accumulationStart = input.time(9, "Accumulation Start Hour (UTC)")
-accumulationHours = input.int(9, "Accumulation Duration (hours)")
-manipulationStart = input.time(15, "Manipulation Start Hour (UTC)")
-manipulationHours = input.int(6, "Manipulation Duration (hours)")
-distributionStart = input.time(21, "Distribution Start Hour (UTC)")
-distributionHours = input.int(9, "Distribution Duration (hours)")
+// Equilibrium Mode
+equilibriumMode = input.string("All", "Equilibrium Mode", options=["All", "High/Low", "Midpoint", "Quarters"])
 
-// Current session detection
+// ===== AMD CYCLE SESSION DEFINITIONS =====
+// Session definitions (Accumulation, Manipulation, Distribution)
+sessionTimezone = input.string("UTC", "Session Timezone", options=["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"])
+accumulationStart = input.int(0, "Accumulation Start Hour", minval=0, maxval=23, tooltip="Start of Accumulation phase (default: Asia session)")
+accumulationHours = input.int(9, "Accumulation Duration (hours)", minval=1, maxval=12)
+manipulationStart = input.int(9, "Manipulation Start Hour", minval=0, maxval=23, tooltip="Start of Manipulation phase (default: London session)")
+manipulationHours = input.int(6, "Manipulation Duration (hours)", minval=1, maxval=12)
+distributionStart = input.int(15, "Distribution Start Hour", minval=0, maxval=23, tooltip="Start of Distribution phase (default: NY session)")
+distributionHours = input.int(9, "Distribution Duration (hours)", minval=1, maxval=12)
+showAMDLabels = input.bool(true, "Show AMD Cycle Labels")
+
+// Color schemes
+accumColor = input.color(color.new(color.green, 85), "Accumulation Color")
+manipColor = input.color(color.new(color.blue, 85), "Manipulation Color")
+distribColor = input.color(color.new(color.red, 85), "Distribution Color")
+
+// ===== CURRENT SESSION DETECTION =====
 currentHour = hour(time)
-isAccumulation = currentHour >= accumulationStart and currentHour < accumulationStart + accumulationHours
-isManipulation = currentHour >= manipulationStart and currentHour < manipulationStart + manipulationHours
-isDistribution = currentHour >= distributionStart and currentHour < distributionStart + distributionHours
+isAccumulation = (currentHour >= accumulationStart and currentHour < (accumulationStart + accumulationHours) % 24)
+isManipulation = (currentHour >= manipulationStart and currentHour < (manipulationStart + manipulationHours) % 24)
+isDistribution = (currentHour >= distributionStart and currentHour < (distributionStart + distributionHours) % 24)
 
-// Calculate Goldbach levels based on PO3
-basePrice = close
-highLevel1 = basePrice + po3
-highLevel2 = basePrice + 2 * po3
-highLevel3 = basePrice + 3 * po3
-lowLevel1 = basePrice - po3
-lowLevel2 = basePrice - 2 * po3
-lowLevel3 = basePrice - 3 * po3
+// ===== POWER OF THREE (PO3) CALCULATIONS =====
+// Convert PO3 multiplier string to integer
+po3Value = po3Multiplier == "3" ? 3 : po3Multiplier == "9" ? 9 : po3Multiplier == "27" ? 27 : po3Multiplier == "81" ? 81 : 243
 
-// Plot levels based on equilibrium mode
+// Calculate PO3 levels dynamically based on recent volatility
+atr14 = ta.atr(14)
+po3Range = atr14 * po3Value / 100  // Scale PO3 by ATR for dynamic support/resistance
+
+// PO3 Support/Resistance zones
+var float[] po3HighLevels = array.new_float(5, na)
+var float[] po3LowLevels = array.new_float(5, na)
+
+for i = 1 to po3Levels
+    array.set(po3HighLevels, i - 1, close + po3Range * i)
+    array.set(po3LowLevels, i - 1, close - po3Range * i)
+
+// ===== HUDDLESTON LEVELS =====
+// Key institutional price points based on recent highs/lows
+huddlestonHigh = ta.highest(high, huddlestonLookback)
+huddlestonLow = ta.lowest(low, huddlestonLookback)
+huddlestonMid = (huddlestonHigh + huddlestonLow) / 2
+huddlestonQ1 = huddlestonLow + (huddlestonHigh - huddlestonLow) * 0.25
+huddlestonQ3 = huddlestonLow + (huddlestonHigh - huddlestonLow) * 0.75
+
+// ===== IPDA (Institutional Price Delivery Arrays) =====
+// Calculate IPDA based on significant price levels
+ipdaHigh = ta.highest(high, ipdaLookback)
+ipdaLow = ta.lowest(low, ipdaLookback)
+ipdaMid = (ipdaHigh + ipdaLow) / 2
+// IPDA premium and discount zones
+ipdaPremium = ipdaMid + (ipdaHigh - ipdaMid) * 0.618  // Golden ratio
+ipdaDiscount = ipdaMid - (ipdaMid - ipdaLow) * 0.618
+
+// ===== LOOKBACK PERIOD ANALYSIS =====
+// 20-40-60 lookback for AMD cycle analysis
+high20 = lookback20 ? ta.highest(high, 20) : na
+low20 = lookback20 ? ta.lowest(low, 20) : na
+high40 = lookback40 ? ta.highest(high, 40) : na
+low40 = lookback40 ? ta.lowest(low, 40) : na
+high60 = lookback60 ? ta.highest(high, 60) : na
+low60 = lookback60 ? ta.lowest(low, 60) : na
+
+// ===== ORDER BLOCK DETECTION =====
+// Bullish Order Block: Last down candle before strong up move
+bullishOB = showOB and close[1] < open[1] and close > close[1] and (high - low) > atr14 * 1.5
+bearishOB = showOB and close[1] > open[1] and close < close[1] and (high - low) > atr14 * 1.5
+
+var float obBullTop = na
+var float obBullBottom = na
+var int obBullBar = na
+var float obBearTop = na
+var float obBearBottom = na
+var int obBearBar = na
+
+if bullishOB
+    obBullTop := high[1]
+    obBullBottom := low[1]
+    obBullBar := bar_index
+
+if bearishOB
+    obBearTop := high[1]
+    obBearBottom := low[1]
+    obBearBar := bar_index
+
+// ===== FAIR VALUE GAP (FVG) DETECTION =====
+// FVG: Gap between consecutive candles indicating imbalance
+bullishFVG = showFVG and low > high[2] and low[1] > high[2]
+bearishFVG = showFVG and high < low[2] and high[1] < low[2]
+
+var float fvgBullTop = na
+var float fvgBullBottom = na
+var int fvgBullBar = na
+var float fvgBearTop = na
+var float fvgBearBottom = na
+var int fvgBearBar = na
+
+if bullishFVG
+    fvgBullTop := low[1]
+    fvgBullBottom := high[2]
+    fvgBullBar := bar_index - 1
+
+if bearishFVG
+    fvgBearTop := low[2]
+    fvgBearBottom := high[1]
+    fvgBearBar := bar_index - 1
+
+// ===== EXTERNAL RANGES =====
+// Identify liquidity zones outside recent ranges
+extHigh = ta.highest(high, extLookback)
+extLow = ta.lowest(low, extLookback)
+extRange = extHigh - extLow
+extUpperTarget = extHigh + extRange * 0.382  // Fibonacci extension
+extLowerTarget = extLow - extRange * 0.382
+
+
+// ===== PLOTTING =====
+// Plot PO3 levels
+if showPO3
+    for i = 0 to po3Levels - 1
+        highLevel = array.get(po3HighLevels, i)
+        lowLevel = array.get(po3LowLevels, i)
+        plot(highLevel, "PO3 High " + str.tostring(i + 1), color=color.new(color.green, 50 + i * 10), linewidth=2 - i * 0.3)
+        plot(lowLevel, "PO3 Low " + str.tostring(i + 1), color=color.new(color.red, 50 + i * 10), linewidth=2 - i * 0.3)
+
+// Plot Huddleston levels
+if showHuddleston
+    plot(huddlestonHigh, "Huddleston High", color=color.new(color.aqua, 30), linewidth=2, style=plot.style_circles)
+    plot(huddlestonLow, "Huddleston Low", color=color.new(color.orange, 30), linewidth=2, style=plot.style_circles)
+    plot(huddlestonMid, "Huddleston Mid", color=color.new(color.gray, 50), linewidth=1, style=plot.style_cross)
+    plot(huddlestonQ1, "Huddleston Q1", color=color.new(color.yellow, 60), linewidth=1)
+    plot(huddlestonQ3, "Huddleston Q3", color=color.new(color.purple, 60), linewidth=1)
+
+// Plot IPDA levels
+if showIPDA
+    plot(ipdaHigh, "IPDA High", color=color.new(color.lime, 40), linewidth=2, style=plot.style_stepline)
+    plot(ipdaLow, "IPDA Low", color=color.new(color.maroon, 40), linewidth=2, style=plot.style_stepline)
+    plot(ipdaMid, "IPDA Equilibrium", color=color.new(color.white, 40), linewidth=2)
+    plot(ipdaPremium, "IPDA Premium", color=color.new(color.teal, 60), linewidth=1)
+    plot(ipdaDiscount, "IPDA Discount", color=color.new(color.fuchsia, 60), linewidth=1)
+
+// Plot lookback levels
+if lookback20
+    plot(high20, "20 High", color=color.new(color.blue, 70), linewidth=1)
+    plot(low20, "20 Low", color=color.new(color.blue, 70), linewidth=1)
+
+if lookback40
+    plot(high40, "40 High", color=color.new(color.purple, 70), linewidth=1)
+    plot(low40, "40 Low", color=color.new(color.purple, 70), linewidth=1)
+
+if lookback60
+    plot(high60, "60 High", color=color.new(color.orange, 70), linewidth=1)
+    plot(low60, "60 Low", color=color.new(color.orange, 70), linewidth=1)
+
+// Plot equilibrium based on mode
 if equilibriumMode == "All" or equilibriumMode == "High/Low"
-    plot(highLevel1, "High Level 1", color=color.green, linewidth=2)
-    plot(highLevel2, "High Level 2", color=color.blue, linewidth=1)
-    plot(highLevel3, "High Level 3", color=color.purple, linewidth=1)
-    plot(lowLevel1, "Low Level 1", color=color.red, linewidth=2)
-    plot(lowLevel2, "Low Level 2", color=color.orange, linewidth=1)
-    plot(lowLevel3, "Low Level 3", color=color.yellow, linewidth=1)
+    plot(close, "Current Price", color=color.white, linewidth=3)
 
-if equilibriumMode == "Midpoint"
-    midpoint = (highLevel1 + lowLevel1) / 2
-    plot(midpoint, "Midpoint", color=color.gray, linewidth=2)
+if equilibriumMode == "Midpoint" or equilibriumMode == "All"
+    midpoint = (array.get(po3HighLevels, 0) + array.get(po3LowLevels, 0)) / 2
+    plot(midpoint, "PO3 Midpoint", color=color.new(color.gray, 30), linewidth=2)
 
-// AMD blocks visualization (simplified example for OB, FVG, Ext)
-if showOB and isAccumulation
-    box.new(left=bar_index - 10, top=highLevel1, right=bar_index, bottom=lowLevel1, bgcolor=color.new(color.green, 90), border_color=color.green, title="Accumulation OB")
-if showFVG and isManipulation
-    box.new(left=bar_index - 10, top=highLevel2, right=bar_index, bottom=lowLevel2, bgcolor=color.new(color.blue, 90), border_color=color.blue, title="Manipulation FVG")
-if showExt and isDistribution
-    box.new(left=bar_index - 10, top=highLevel3, right=bar_index, bottom=lowLevel3, bgcolor=color.new(color.red, 90), border_color=color.red, title="Distribution Ext")
+if equilibriumMode == "Quarters" or equilibriumMode == "All"
+    q1 = array.get(po3LowLevels, 0) + (array.get(po3HighLevels, 0) - array.get(po3LowLevels, 0)) * 0.25
+    q3 = array.get(po3LowLevels, 0) + (array.get(po3HighLevels, 0) - array.get(po3LowLevels, 0)) * 0.75
+    plot(q1, "Q1", color=color.new(color.silver, 60), linewidth=1)
+    plot(q3, "Q3", color=color.new(color.silver, 60), linewidth=1)
 
-// Labels for session
-sessionLabel = isAccumulation ? "Accumulation" : isManipulation ? "Manipulation" : isDistribution ? "Distribution" : "Other"
-label.new(bar_index, high, sessionLabel, style=label.style_label_down, color=color.white, textcolor=color.black)
+// ===== ORDER BLOCKS VISUALIZATION =====
+if showOB
+    // Draw bullish order block
+    if not na(obBullBar) and bar_index - obBullBar <= obLookback
+        box.new(obBullBar - 1, obBullTop, bar_index, obBullBottom, 
+                bgcolor=color.new(color.green, 90), 
+                border_color=color.new(color.green, 50), 
+                border_width=1,
+                text="Bull OB",
+                text_color=color.green)
+    
+    // Draw bearish order block
+    if not na(obBearBar) and bar_index - obBearBar <= obLookback
+        box.new(obBearBar - 1, obBearTop, bar_index, obBearBottom, 
+                bgcolor=color.new(color.red, 90), 
+                border_color=color.new(color.red, 50), 
+                border_width=1,
+                text="Bear OB",
+                text_color=color.red)
+
+// ===== FVG VISUALIZATION =====
+if showFVG
+    // Draw bullish FVG
+    if not na(fvgBullBar) and bar_index - fvgBullBar <= fvgLookback
+        box.new(fvgBullBar, fvgBullTop, bar_index, fvgBullBottom, 
+                bgcolor=color.new(color.blue, 85), 
+                border_color=color.new(color.blue, 40), 
+                border_width=1,
+                text="FVG+",
+                text_color=color.blue)
+    
+    // Draw bearish FVG
+    if not na(fvgBearBar) and bar_index - fvgBearBar <= fvgLookback
+        box.new(fvgBearBar, fvgBearTop, bar_index, fvgBearBottom, 
+                bgcolor=color.new(color.orange, 85), 
+                border_color=color.new(color.orange, 40), 
+                border_width=1,
+                text="FVG-",
+                text_color=color.orange)
+
+// ===== EXTERNAL RANGES VISUALIZATION =====
+if showExt
+    plot(extUpperTarget, "External Upper", color=color.new(color.purple, 50), linewidth=2, style=plot.style_circles)
+    plot(extLowerTarget, "External Lower", color=color.new(color.yellow, 50), linewidth=2, style=plot.style_circles)
+    
+// ===== AMD CYCLE VISUALIZATION =====
+// Background coloring for AMD cycles
+bgcolor(isAccumulation ? accumColor : na, title="Accumulation Phase")
+bgcolor(isManipulation ? manipColor : na, title="Manipulation Phase")
+bgcolor(isDistribution ? distribColor : na, title="Distribution Phase")
+
+// AMD session labels
+if showAMDLabels
+    sessionLabel = isAccumulation ? "A" : isManipulation ? "M" : isDistribution ? "D" : ""
+    sessionColor = isAccumulation ? color.green : isManipulation ? color.blue : isDistribution ? color.red : color.gray
+    sessionFullName = isAccumulation ? "Accumulation" : isManipulation ? "Manipulation" : isDistribution ? "Distribution" : "Transition"
+    
+    if bar_index % 10 == 0 and sessionLabel != ""
+        label.new(bar_index, high, sessionLabel, 
+                 style=label.style_label_down, 
+                 color=sessionColor, 
+                 textcolor=color.white,
+                 size=size.small,
+                 tooltip=sessionFullName)
+
+// ===== ALERTS =====
+// Alert conditions for key levels
+alertcondition(ta.crossover(close, ipdaMid), "Price Above IPDA Equilibrium", "Price crossed above IPDA equilibrium")
+alertcondition(ta.crossunder(close, ipdaMid), "Price Below IPDA Equilibrium", "Price crossed below IPDA equilibrium")
+alertcondition(bullishOB, "Bullish Order Block Detected", "New bullish order block formed")
+alertcondition(bearishOB, "Bearish Order Block Detected", "New bearish order block formed")
+alertcondition(bullishFVG, "Bullish FVG Detected", "Bullish fair value gap detected")
+alertcondition(bearishFVG, "Bearish FVG Detected", "Bearish fair value gap detected")
