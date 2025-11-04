@@ -1,0 +1,388 @@
+//@version=5
+indicator("Goldbach AMD-PO3 Levels", shorttitle="Goldbach AMD", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+// ==================================================================================
+// GOLDBACH FUNDAMENTALS - AMD-PO3 INDICATOR
+// ==================================================================================
+// This indicator implements the concepts from the Goldbach Fundamentals book,
+// incorporating Power of Three (PO3) levels and intraday AMD cycles
+// (Accumulation, Manipulation, Distribution) to identify potential trading zones.
+// ==================================================================================
+
+// ==================================================================================
+// USER INPUTS
+// ==================================================================================
+
+// PO3 Range Settings
+po3_input = input.int(81, "PO3 Range (27/81/243)", minval=27, maxval=729, 
+     tooltip="Power of Three range for Goldbach levels. Common values: 27 (low volatility), 81 (medium), 243 (high volatility)")
+levels_above = input.int(3, "Levels Above Price", minval=1, maxval=10, 
+     tooltip="Number of Goldbach levels to plot above current price")
+levels_below = input.int(3, "Levels Below Price", minval=1, maxval=10, 
+     tooltip="Number of Goldbach levels to plot below current price")
+
+// AMD Cycle Time Settings
+input_group_amd = "AMD Cycle Times (24-hour format)"
+accumulation_start = input.int(0, "Accumulation Start Hour", minval=0, maxval=23, group=input_group_amd, 
+     tooltip="Start hour for Accumulation phase (Asia session, default: 0 = midnight)")
+accumulation_duration = input.int(9, "Accumulation Duration (hours)", minval=1, maxval=12, group=input_group_amd,
+     tooltip="Duration of Accumulation phase in hours")
+manipulation_duration = input.int(6, "Manipulation Duration (hours)", minval=1, maxval=12, group=input_group_amd,
+     tooltip="Duration of Manipulation phase in hours")
+distribution_duration = input.int(9, "Distribution Duration (hours)", minval=1, maxval=12, group=input_group_amd,
+     tooltip="Duration of Distribution phase in hours")
+
+// Session Times (for reference and visualization)
+input_group_sessions = "Session Times"
+show_session_boxes = input.bool(true, "Show Session Boxes", group=input_group_sessions)
+asia_session = input.session("0000-0900", "Asia Session", group=input_group_sessions)
+london_session = input.session("0300-1200", "London Session", group=input_group_sessions)
+newyork_session = input.session("0800-1700", "New York Session", group=input_group_sessions)
+
+// Display Options
+input_group_display = "Display Options"
+show_goldbach_levels = input.bool(true, "Show Goldbach Levels", group=input_group_display)
+show_order_blocks = input.bool(true, "Show Order Blocks", group=input_group_display)
+show_fvg = input.bool(true, "Show Fair Value Gaps", group=input_group_display)
+show_ext_range = input.bool(true, "Show External Ranges", group=input_group_display)
+show_amd_blocks = input.bool(true, "Show AMD Blocks", group=input_group_display)
+
+// Equilibrium Mode
+eq_mode = input.string("Midpoint", "Equilibrium Mode", options=["High", "Low", "Midpoint"], group=input_group_display,
+     tooltip="How to calculate equilibrium: High (range high), Low (range low), Midpoint (50%)")
+
+// Color Settings
+input_group_colors = "Color Settings"
+color_accumulation = input.color(color.new(color.blue, 85), "Accumulation", group=input_group_colors)
+color_manipulation = input.color(color.new(color.yellow, 85), "Manipulation", group=input_group_colors)
+color_distribution = input.color(color.new(color.red, 85), "Distribution", group=input_group_colors)
+color_goldbach_bull = input.color(color.new(color.green, 70), "Goldbach Levels (Bullish)", group=input_group_colors)
+color_goldbach_bear = input.color(color.new(color.red, 70), "Goldbach Levels (Bearish)", group=input_group_colors)
+color_ob_bull = input.color(color.new(color.green, 80), "Order Block (Bullish)", group=input_group_colors)
+color_ob_bear = input.color(color.new(color.red, 80), "Order Block (Bearish)", group=input_group_colors)
+color_fvg = input.color(color.new(color.purple, 90), "Fair Value Gap", group=input_group_colors)
+
+// ==================================================================================
+// HELPER FUNCTIONS
+// ==================================================================================
+
+// Calculate Power of Three levels
+calcPO3Levels(basePrice, po3Range, numLevels, isAbove) =>
+    var levels = array.new_float(0)
+    array.clear(levels)
+    for i = 1 to numLevels
+        level = isAbove ? basePrice + (po3Range * i) : basePrice - (po3Range * i)
+        array.push(levels, level)
+    levels
+
+// Get current AMD phase based on time
+getAMDPhase(currentHour, currentMinute) =>
+    totalMinutes = currentHour * 60 + currentMinute
+    
+    accum_start_min = accumulation_start * 60
+    accum_end_min = accum_start_min + (accumulation_duration * 60)
+    manip_end_min = accum_end_min + (manipulation_duration * 60)
+    distrib_end_min = manip_end_min + (distribution_duration * 60)
+    
+    // Handle wrap-around for 24-hour period
+    totalMinutes_adjusted = totalMinutes >= accum_start_min ? totalMinutes : totalMinutes + 1440
+    
+    phase = ""
+    if totalMinutes_adjusted >= accum_start_min and totalMinutes_adjusted < accum_end_min
+        phase := "Accumulation"
+    else if totalMinutes_adjusted >= accum_end_min and totalMinutes_adjusted < manip_end_min
+        phase := "Manipulation"
+    else if totalMinutes_adjusted >= manip_end_min and totalMinutes_adjusted < distrib_end_min
+        phase := "Distribution"
+    else
+        phase := "None"
+    phase
+
+// Calculate equilibrium based on mode
+calcEquilibrium(highVal, lowVal, mode) =>
+    eq = switch mode
+        "High" => highVal
+        "Low" => lowVal
+        "Midpoint" => (highVal + lowVal) / 2
+        => (highVal + lowVal) / 2
+    eq
+
+// ==================================================================================
+// GOLDBACH LEVEL CALCULATIONS
+// ==================================================================================
+
+// Calculate reference price for Goldbach levels (using daily open/close)
+var float referencePrice = na
+if timeframe.isDaily or timeframe.isWeekly
+    referencePrice := close
+else
+    // For intraday, use the day's open as reference
+    referencePrice := ta.valuewhen(ta.change(time("D")) != 0, open, 0)
+
+// If no reference price is set, use current close
+if na(referencePrice)
+    referencePrice := close
+
+// Calculate Goldbach levels above and below
+levelsAbove = calcPO3Levels(referencePrice, po3_input, levels_above, true)
+levelsBelow = calcPO3Levels(referencePrice, po3_input, levels_below, false)
+
+// ==================================================================================
+// AMD PHASE DETECTION
+// ==================================================================================
+
+currentHour = hour(time)
+currentMinute = minute(time)
+currentPhase = getAMDPhase(currentHour, currentMinute)
+
+// Track phase changes
+var string previousPhase = na
+phaseChanged = currentPhase != previousPhase
+if phaseChanged
+    previousPhase := currentPhase
+
+// Store phase high/low for AMD blocks
+var float accumHighVal = na
+var float accumLowVal = na
+var float manipHighVal = na
+var float manipLowVal = na
+var float distribHighVal = na
+var float distribLowVal = na
+
+// Update high/low for each phase
+if currentPhase == "Accumulation"
+    accumHighVal := na(accumHighVal) ? high : math.max(accumHighVal, high)
+    accumLowVal := na(accumLowVal) ? low : math.min(accumLowVal, low)
+    if phaseChanged
+        manipHighVal := na
+        manipLowVal := na
+else if currentPhase == "Manipulation"
+    manipHighVal := na(manipHighVal) ? high : math.max(manipHighVal, high)
+    manipLowVal := na(manipLowVal) ? low : math.min(manipLowVal, low)
+    if phaseChanged
+        distribHighVal := na
+        distribLowVal := na
+else if currentPhase == "Distribution"
+    distribHighVal := na(distribHighVal) ? high : math.max(distribHighVal, high)
+    distribLowVal := na(distribLowVal) ? low : math.min(distribLowVal, low)
+    if phaseChanged
+        accumHighVal := na
+        accumLowVal := na
+
+// ==================================================================================
+// ORDER BLOCK DETECTION
+// ==================================================================================
+
+// Bullish Order Block: Last down candle before a strong up move
+isBullishOB = false
+obBullHigh = 0.0
+obBullLow = 0.0
+
+if close[2] < open[2] and close[1] > open[1] and close > close[1] and (close - open) > (close[1] - open[1])
+    isBullishOB := true
+    obBullHigh := high[2]
+    obBullLow := low[2]
+
+// Bearish Order Block: Last up candle before a strong down move
+isBearishOB = false
+obBearHigh = 0.0
+obBearLow = 0.0
+
+if close[2] > open[2] and close[1] < open[1] and close < close[1] and (open - close) > (open[1] - close[1])
+    isBearishOB := true
+    obBearHigh := high[2]
+    obBearLow := low[2]
+
+// ==================================================================================
+// FAIR VALUE GAP (FVG) DETECTION
+// ==================================================================================
+
+// Bullish FVG: Gap between high[2] and low[0] when close[1] > close[2]
+isBullishFVG = false
+fvgBullTop = 0.0
+fvgBullBottom = 0.0
+
+if low > high[2] and close[1] > close[2]
+    isBullishFVG := true
+    fvgBullTop := low
+    fvgBullBottom := high[2]
+
+// Bearish FVG: Gap between low[2] and high[0] when close[1] < close[2]
+isBearishFVG = false
+fvgBearTop = 0.0
+fvgBearBottom = 0.0
+
+if high < low[2] and close[1] < close[2]
+    isBearishFVG := true
+    fvgBearTop := low[2]
+    fvgBearBottom := high
+
+// ==================================================================================
+// EXTERNAL RANGE CALCULATIONS
+// ==================================================================================
+
+// Calculate external range (high/low of previous day)
+var float extRangeHigh = na
+var float extRangeLow = na
+
+if ta.change(time("D"))
+    extRangeHigh := high[1]
+    extRangeLow := low[1]
+else
+    extRangeHigh := nz(extRangeHigh, high)
+    extRangeLow := nz(extRangeLow, low)
+
+// ==================================================================================
+// PLOTTING - GOLDBACH LEVELS
+// ==================================================================================
+
+if show_goldbach_levels
+    // Plot levels above
+    for i = 0 to array.size(levelsAbove) - 1
+        levelValue = array.get(levelsAbove, i)
+        levelColor = close > referencePrice ? color_goldbach_bull : color_goldbach_bear
+        plot(levelValue, "Goldbach +" + str.tostring(i + 1), color=levelColor, linewidth=1, style=plot.style_linebr)
+    
+    // Plot levels below
+    for i = 0 to array.size(levelsBelow) - 1
+        levelValue = array.get(levelsBelow, i)
+        levelColor = close > referencePrice ? color_goldbach_bull : color_goldbach_bear
+        plot(levelValue, "Goldbach -" + str.tostring(i + 1), color=levelColor, linewidth=1, style=plot.style_linebr)
+    
+    // Plot reference price
+    plot(referencePrice, "Reference Price", color=color.new(color.gray, 50), linewidth=2, style=plot.style_circles)
+
+// ==================================================================================
+// PLOTTING - AMD BLOCKS
+// ==================================================================================
+
+if show_amd_blocks
+    // Plot AMD phase background
+    bgcolor(currentPhase == "Accumulation" ? color_accumulation : na, title="Accumulation Phase")
+    bgcolor(currentPhase == "Manipulation" ? color_manipulation : na, title="Manipulation Phase")
+    bgcolor(currentPhase == "Distribution" ? color_distribution : na, title="Distribution Phase")
+    
+    // Plot AMD phase high/low lines
+    accumEq = na(accumHighVal) or na(accumLowVal) ? na : calcEquilibrium(accumHighVal, accumLowVal, eq_mode)
+    manipEq = na(manipHighVal) or na(manipLowVal) ? na : calcEquilibrium(manipHighVal, manipLowVal, eq_mode)
+    distribEq = na(distribHighVal) or na(distribLowVal) ? na : calcEquilibrium(distribHighVal, distribLowVal, eq_mode)
+    
+    plot(currentPhase == "Accumulation" ? accumEq : na, "Accum EQ", color=color.new(color.blue, 30), linewidth=2)
+    plot(currentPhase == "Manipulation" ? manipEq : na, "Manip EQ", color=color.new(color.yellow, 30), linewidth=2)
+    plot(currentPhase == "Distribution" ? distribEq : na, "Distrib EQ", color=color.new(color.red, 30), linewidth=2)
+
+// ==================================================================================
+// PLOTTING - ORDER BLOCKS
+// ==================================================================================
+
+var box bullishOBBox = na
+var box bearishOBBox = na
+
+if show_order_blocks
+    // Draw bullish order block
+    if isBullishOB
+        if not na(bullishOBBox)
+            box.delete(bullishOBBox)
+        bullishOBBox := box.new(bar_index - 2, obBullHigh, bar_index + 20, obBullLow, 
+             border_color=color_ob_bull, bgcolor=color_ob_bull, border_width=1, extend=extend.right)
+    
+    // Draw bearish order block
+    if isBearishOB
+        if not na(bearishOBBox)
+            box.delete(bearishOBBox)
+        bearishOBBox := box.new(bar_index - 2, obBearHigh, bar_index + 20, obBearLow, 
+             border_color=color_ob_bear, bgcolor=color_ob_bear, border_width=1, extend=extend.right)
+
+// ==================================================================================
+// PLOTTING - FAIR VALUE GAPS
+// ==================================================================================
+
+if show_fvg
+    // Draw bullish FVG
+    if isBullishFVG
+        box.new(bar_index - 2, fvgBullTop, bar_index + 10, fvgBullBottom, 
+             border_color=color.new(color.green, 70), bgcolor=color_fvg, 
+             border_width=1, extend=extend.right)
+    
+    // Draw bearish FVG
+    if isBearishFVG
+        box.new(bar_index - 2, fvgBearTop, bar_index + 10, fvgBearBottom, 
+             border_color=color.new(color.red, 70), bgcolor=color_fvg, 
+             border_width=1, extend=extend.right)
+
+// ==================================================================================
+// PLOTTING - EXTERNAL RANGES
+// ==================================================================================
+
+if show_ext_range
+    plot(extRangeHigh, "Ext Range High", color=color.new(color.orange, 50), linewidth=2, style=plot.style_circles)
+    plot(extRangeLow, "Ext Range Low", color=color.new(color.orange, 50), linewidth=2, style=plot.style_circles)
+
+// ==================================================================================
+// LABELS AND INFORMATION
+// ==================================================================================
+
+// Display current phase label
+if barstate.islast and show_amd_blocks
+    label.new(bar_index, high, 
+         text="AMD Phase: " + currentPhase + "\nPO3 Range: " + str.tostring(po3_input), 
+         style=label.style_label_down, color=color.new(color.gray, 30), textcolor=color.white, size=size.small)
+
+// Display session boxes (optional visual aid)
+if show_session_boxes
+    // This provides visual reference for major trading sessions
+    isInAsia = time(timeframe.period, asia_session)
+    isInLondon = time(timeframe.period, london_session)
+    isInNY = time(timeframe.period, newyork_session)
+    
+    bgcolor(isInAsia ? color.new(color.blue, 95) : na, title="Asia Session BG")
+    bgcolor(isInLondon ? color.new(color.yellow, 95) : na, title="London Session BG")
+    bgcolor(isInNY ? color.new(color.green, 95) : na, title="NY Session BG")
+
+// ==================================================================================
+// ALERTS
+// ==================================================================================
+
+// Alert when price crosses Goldbach levels
+alertcondition(ta.cross(close, referencePrice), title="Price Crosses Reference", 
+     message="Price has crossed the reference price level")
+
+// Alert on AMD phase change
+alertcondition(phaseChanged, title="AMD Phase Change", 
+     message="AMD phase has changed to: {{plot_0}}")
+
+// Alert on Order Block formation
+alertcondition(isBullishOB or isBearishOB, title="Order Block Detected", 
+     message="New Order Block detected")
+
+// Alert on Fair Value Gap formation
+alertcondition(isBullishFVG or isBearishFVG, title="Fair Value Gap Detected", 
+     message="New Fair Value Gap detected")
+
+// ==================================================================================
+// NOTES AND USAGE
+// ==================================================================================
+// 
+// GOLDBACH FUNDAMENTALS CONCEPT:
+// - Uses Power of Three (PO3) ranges to divide price into levels
+// - Common PO3 values: 27 (low volatility), 81 (medium), 243 (high volatility)
+// - Levels act as potential support/resistance zones
+//
+// AMD CYCLES:
+// - Accumulation: Smart money accumulates positions (typically Asia session)
+// - Manipulation: Price moves to trigger stops and create liquidity (London open)
+// - Distribution: Smart money distributes/exits positions (NY session)
+//
+// TRADING APPROACH:
+// - Look for entries at Goldbach levels during Accumulation phase
+// - Watch for manipulation during the Manipulation phase (fake moves)
+// - Target exits at distribution phase or next Goldbach level
+// - Order Blocks and FVGs provide additional confluence
+//
+// CUSTOMIZATION:
+// - Adjust PO3 range based on asset volatility
+// - Align AMD cycle times with your trading sessions
+// - Toggle display elements based on your trading style
+// - Use equilibrium mode to fine-tune entry/exit levels
+//
+// ==================================================================================
